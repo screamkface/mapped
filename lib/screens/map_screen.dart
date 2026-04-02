@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../controllers/destination_controller.dart';
 import '../models/destination.dart';
+import '../services/device_location_service.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({
@@ -21,14 +22,37 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
+  static const LatLng _fallbackTarget = LatLng(41.8719, 12.5674);
+
+  final DeviceLocationService _deviceLocationService = DeviceLocationService();
+
   GoogleMapController? _mapController;
   String _lastBoundsSignature = '';
+  DeviceLocationStatus _locationStatus = DeviceLocationStatus.unknown;
+  LatLng? _currentLocation;
+  String? _locationMessage;
+  bool _isResolvingLocation = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_refreshCurrentLocation());
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _mapController?.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshCurrentLocation());
+    }
   }
 
   @override
@@ -37,11 +61,9 @@ class _MapScreenState extends State<MapScreen> {
     final destinations = controller.mappableDestinations;
     final selected = controller.selectedDestination;
 
-    if (destinations.isEmpty) {
-      return _NoMarkersState(missingCount: controller.missingCoordinatesCount);
+    if (destinations.isNotEmpty) {
+      _scheduleBoundsUpdate(destinations);
     }
-
-    _scheduleBoundsUpdate(destinations);
 
     return Stack(
       children: <Widget>[
@@ -50,28 +72,25 @@ class _MapScreenState extends State<MapScreen> {
           child: GoogleMap(
             initialCameraPosition: CameraPosition(
               target: _initialTarget(destinations),
-              zoom: destinations.length == 1 ? 12 : 5.2,
+              zoom: _initialZoom(destinations),
             ),
             markers: destinations.map(_buildMarker).toSet(),
-            myLocationButtonEnabled: false,
+            myLocationEnabled: _locationStatus == DeviceLocationStatus.available,
+            myLocationButtonEnabled:
+                _locationStatus == DeviceLocationStatus.available,
             mapToolbarEnabled: false,
             onMapCreated: (mapController) {
               _mapController = mapController;
-              _fitBounds(destinations);
+              if (destinations.isNotEmpty) {
+                _fitBounds(destinations);
+                return;
+              }
+              unawaited(_centerOnCurrentLocation());
             },
             onTap: (_) => controller.selectDestination(null),
           ),
         ),
-        if (controller.missingCoordinatesCount > 0)
-          Positioned(
-            top: 16,
-            left: 16,
-            right: 16,
-            child: _Banner(
-              text:
-                  '${controller.missingCoordinatesCount} record senza coordinate non sono mostrati sulla mappa.',
-            ),
-          ),
+        ..._buildTopBanners(controller),
         if (selected != null && selected.hasCoordinates)
           Positioned(
             left: 16,
@@ -82,15 +101,108 @@ class _MapScreenState extends State<MapScreen> {
               onOpenDetail: () => widget.onOpenDetail(selected.id),
               onNavigate: () => widget.onNavigate(selected),
             ),
+          )
+        else if (destinations.isEmpty)
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 16,
+            child: _NoMarkersState(
+              missingCount: controller.missingCoordinatesCount,
+              hasCurrentLocation:
+                  _locationStatus == DeviceLocationStatus.available,
+            ),
           ),
       ],
     );
   }
 
+  List<Widget> _buildTopBanners(DestinationController controller) {
+    final banners = <Widget>[
+      if (controller.missingCoordinatesCount > 0)
+        _Banner(
+          text:
+              '${controller.missingCoordinatesCount} record senza coordinate non sono mostrati sulla mappa.',
+        ),
+      if (_buildLocationBanner() case final locationBanner?) locationBanner,
+    ];
+
+    if (banners.isEmpty) {
+      return const <Widget>[];
+    }
+
+    return <Widget>[
+      Positioned(
+        top: 16,
+        left: 16,
+        right: 16,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: banners
+              .expand((banner) => <Widget>[banner, const SizedBox(height: 10)])
+              .toList(growable: true)
+            ..removeLast(),
+        ),
+      ),
+    ];
+  }
+
+  Widget? _buildLocationBanner() {
+    if (_isResolvingLocation && _currentLocation == null) {
+      return const _StatusBanner(
+        icon: Icons.my_location_outlined,
+        text: 'Recupero posizione attuale in corso...',
+        isLoading: true,
+      );
+    }
+
+    switch (_locationStatus) {
+      case DeviceLocationStatus.unknown:
+      case DeviceLocationStatus.available:
+        return null;
+      case DeviceLocationStatus.servicesDisabled:
+        return _StatusBanner(
+          icon: Icons.location_disabled_outlined,
+          text:
+              _locationMessage ??
+              'Attiva la posizione del dispositivo per vedere il tuo punto attuale.',
+          actionLabel: 'Impostazioni',
+          onAction: _openLocationSettings,
+        );
+      case DeviceLocationStatus.denied:
+        return _StatusBanner(
+          icon: Icons.location_searching_outlined,
+          text:
+              _locationMessage ??
+              'Consenti l’accesso alla posizione per vedere il tuo punto attuale.',
+          actionLabel: 'Consenti',
+          onAction: () => _refreshCurrentLocation(recenterMap: true),
+        );
+      case DeviceLocationStatus.deniedForever:
+        return _StatusBanner(
+          icon: Icons.lock_outline,
+          text:
+              _locationMessage ??
+              'Il permesso posizione è bloccato. Riattivalo nelle impostazioni dell’app.',
+          actionLabel: 'Apri app',
+          onAction: _openAppSettings,
+        );
+      case DeviceLocationStatus.error:
+        return _StatusBanner(
+          icon: Icons.gps_off_outlined,
+          text:
+              _locationMessage ??
+              'Posizione attuale non disponibile. Riprova tra poco.',
+          actionLabel: 'Riprova',
+          onAction: () => _refreshCurrentLocation(recenterMap: true),
+        );
+    }
+  }
+
   Marker _buildMarker(Destination destination) {
+    final controller = context.read<DestinationController>();
     final isSelected =
-        destination.id ==
-        context.read<DestinationController>().selectedDestinationId;
+        destination.id == controller.selectedDestinationId;
 
     return Marker(
       markerId: MarkerId(destination.id),
@@ -98,20 +210,29 @@ class _MapScreenState extends State<MapScreen> {
       icon: BitmapDescriptor.defaultMarkerWithHue(
         isSelected
             ? BitmapDescriptor.hueAzure
-            : destination.status == DestinationStatus.completed
-            ? BitmapDescriptor.hueGreen
-            : BitmapDescriptor.hueRed,
+            : controller.markerHueFor(destination),
       ),
       onTap: () {
-        context.read<DestinationController>().selectDestination(destination.id);
+        controller.selectDestination(destination.id);
       },
       infoWindow: InfoWindow(title: destination.displayName),
     );
   }
 
   LatLng _initialTarget(List<Destination> destinations) {
-    final first = destinations.first;
-    return LatLng(first.latitude!, first.longitude!);
+    if (destinations.isNotEmpty) {
+      final first = destinations.first;
+      return LatLng(first.latitude!, first.longitude!);
+    }
+
+    return _currentLocation ?? _fallbackTarget;
+  }
+
+  double _initialZoom(List<Destination> destinations) {
+    if (destinations.isEmpty) {
+      return _currentLocation == null ? 5.8 : 14;
+    }
+    return destinations.length == 1 ? 12 : 5.2;
   }
 
   void _scheduleBoundsUpdate(List<Destination> destinations) {
@@ -180,6 +301,61 @@ class _MapScreenState extends State<MapScreen> {
       }),
     );
   }
+
+  Future<void> _refreshCurrentLocation({bool recenterMap = false}) async {
+    if (_isResolvingLocation) {
+      return;
+    }
+
+    setState(() {
+      _isResolvingLocation = true;
+    });
+
+    final result = await _deviceLocationService.resolveCurrentPosition();
+    if (!mounted) {
+      return;
+    }
+
+    LatLng? currentLocation;
+    final position = result.position;
+    if (position != null) {
+      currentLocation = LatLng(position.latitude, position.longitude);
+    }
+
+    setState(() {
+      _isResolvingLocation = false;
+      _locationStatus = result.status;
+      _locationMessage = result.message;
+      _currentLocation = currentLocation ?? _currentLocation;
+    });
+
+    if (result.status == DeviceLocationStatus.available &&
+        _currentLocation != null &&
+        (recenterMap ||
+            context.read<DestinationController>().mappableDestinations.isEmpty)) {
+      await _centerOnCurrentLocation();
+    }
+  }
+
+  Future<void> _centerOnCurrentLocation() async {
+    final currentLocation = _currentLocation;
+    final mapController = _mapController;
+    if (currentLocation == null || mapController == null) {
+      return;
+    }
+
+    await mapController.animateCamera(
+      CameraUpdate.newLatLngZoom(currentLocation, 15),
+    );
+  }
+
+  Future<void> _openAppSettings() async {
+    await _deviceLocationService.openAppSettings();
+  }
+
+  Future<void> _openLocationSettings() async {
+    await _deviceLocationService.openLocationSettings();
+  }
 }
 
 class _Banner extends StatelessWidget {
@@ -200,6 +376,52 @@ class _Banner extends StatelessWidget {
             const Icon(Icons.info_outline),
             const SizedBox(width: 10),
             Expanded(child: Text(text)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusBanner extends StatelessWidget {
+  const _StatusBanner({
+    required this.icon,
+    required this.text,
+    this.actionLabel,
+    this.onAction,
+    this.isLoading = false,
+  });
+
+  final IconData icon;
+  final String text;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+  final bool isLoading;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFFE8F4F0),
+      elevation: 1,
+      borderRadius: BorderRadius.circular(18),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: <Widget>[
+            Icon(icon),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text)),
+            if (isLoading)
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2.2),
+              )
+            else if (actionLabel != null && onAction != null)
+              TextButton(
+                onPressed: onAction,
+                child: Text(actionLabel!),
+              ),
           ],
         ),
       ),
@@ -271,38 +493,47 @@ class _SelectedDestinationCard extends StatelessWidget {
 }
 
 class _NoMarkersState extends StatelessWidget {
-  const _NoMarkersState({required this.missingCount});
+  const _NoMarkersState({
+    required this.missingCount,
+    required this.hasCurrentLocation,
+  });
 
   final int missingCount;
+  final bool hasCurrentLocation;
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(
-                Icons.pin_drop_outlined,
-                size: 44,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Nessun marker disponibile',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                missingCount > 0
-                    ? 'I record presenti non hanno coordinate valide. Rimangono comunque disponibili in tabella e nel dettaglio.'
-                    : 'Importa o crea destinazioni con latitudine e longitudine per visualizzarle sulla mappa.',
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              hasCurrentLocation
+                  ? Icons.my_location_outlined
+                  : Icons.pin_drop_outlined,
+              size: 44,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              hasCurrentLocation
+                  ? 'Posizione attuale visibile'
+                  : 'Nessun marker disponibile',
+              style: Theme.of(context).textTheme.titleMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              hasCurrentLocation
+                  ? 'La mappa mostra già il tuo punto attuale. Aggiungi o importa destinazioni con coordinate per vedere anche i marker dei siti.'
+                  : missingCount > 0
+                  ? 'I record presenti non hanno coordinate valide. Rimangono comunque disponibili in tabella e nel dettaglio.'
+                  : 'Importa o crea destinazioni con latitudine e longitudine per visualizzarle sulla mappa.',
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );

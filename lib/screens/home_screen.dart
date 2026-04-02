@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/destination_controller.dart';
+import '../models/app_preferences.dart';
 import '../models/destination.dart';
 import '../services/drive_sync_service.dart';
 import '../widgets/destination_data_table.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({
     super.key,
     required this.onAddDestination,
@@ -17,6 +18,8 @@ class HomeScreen extends StatelessWidget {
     required this.onImportSample,
     required this.onLinkDrive,
     required this.onSyncDrive,
+    required this.onConfigureColumns,
+    required this.onSaveFilter,
   });
 
   final Future<void> Function() onAddDestination;
@@ -27,18 +30,56 @@ class HomeScreen extends StatelessWidget {
   final Future<void> Function() onImportSample;
   final Future<void> Function() onLinkDrive;
   final Future<void> Function() onSyncDrive;
+  final Future<void> Function() onConfigureColumns;
+  final Future<void> Function() onSaveFilter;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  late final TextEditingController _searchController;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final controller = context.watch<DestinationController>();
     final destinations = controller.visibleDestinations;
+    final categories = controller.knownCategories;
+    final tags = controller.knownTags;
+    final selectedCategory = categories.contains(controller.categoryFilter)
+        ? controller.categoryFilter
+        : '';
+    final selectedTag = tags.contains(controller.tagFilter)
+        ? controller.tagFilter
+        : '';
+
+    if (_searchController.text != controller.searchQuery) {
+      _searchController.value = TextEditingValue(
+        text: controller.searchQuery,
+        selection: TextSelection.collapsed(
+          offset: controller.searchQuery.length,
+        ),
+      );
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final availableHeight = constraints.maxHeight.isFinite
             ? constraints.maxHeight
             : MediaQuery.sizeOf(context).height;
-        final tableHeight = (availableHeight * 0.48).clamp(260.0, 520.0);
+        final tableHeight = (availableHeight * 0.48).clamp(280.0, 560.0);
 
         return SingleChildScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
@@ -56,8 +97,8 @@ class HomeScreen extends StatelessWidget {
                   selectedFile: controller.driveSelectedFile,
                   accountEmail: controller.driveAccountEmail,
                   lastSyncAt: controller.driveLastSyncAt,
-                  onLinkDrive: onLinkDrive,
-                  onSyncDrive: onSyncDrive,
+                  onLinkDrive: widget.onLinkDrive,
+                  onSyncDrive: widget.onSyncDrive,
                 ),
                 const SizedBox(height: 12),
                 Card(
@@ -71,28 +112,47 @@ class HomeScreen extends StatelessWidget {
                           runSpacing: 8,
                           children: <Widget>[
                             OutlinedButton.icon(
-                              onPressed: onImportFromDevice,
+                              onPressed: widget.onImportFromDevice,
                               icon: const Icon(Icons.upload_file_outlined),
                               label: const Text('Importa CSV/XLSX'),
                             ),
                             TextButton.icon(
-                              onPressed: onImportSample,
+                              onPressed: widget.onImportSample,
                               icon: const Icon(Icons.description_outlined),
                               label: const Text('Carica esempio'),
                             ),
                             FilledButton.tonalIcon(
-                              onPressed: onAddDestination,
+                              onPressed: widget.onConfigureColumns,
+                              icon: const Icon(Icons.view_column_outlined),
+                              label: const Text('Colonne'),
+                            ),
+                            FilledButton.tonalIcon(
+                              onPressed: widget.onSaveFilter,
+                              icon: const Icon(Icons.bookmark_add_outlined),
+                              label: const Text('Salva filtro'),
+                            ),
+                            FilledButton.icon(
+                              onPressed: widget.onAddDestination,
                               icon: const Icon(Icons.add),
                               label: const Text('Nuova riga'),
                             ),
                           ],
                         ),
                         const SizedBox(height: 16),
-                        TextFormField(
-                          initialValue: controller.searchQuery,
-                          decoration: const InputDecoration(
-                            hintText: 'Cerca per nome o indirizzo',
-                            prefixIcon: Icon(Icons.search),
+                        TextField(
+                          controller: _searchController,
+                          decoration: InputDecoration(
+                            hintText: 'Cerca per nome, indirizzo, categoria o campi custom',
+                            prefixIcon: const Icon(Icons.search),
+                            suffixIcon: controller.searchQuery.isEmpty
+                                ? null
+                                : IconButton(
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      controller.updateSearchQuery('');
+                                    },
+                                    icon: const Icon(Icons.close),
+                                  ),
                           ),
                           onChanged: controller.updateSearchQuery,
                         ),
@@ -113,6 +173,67 @@ class HomeScreen extends StatelessWidget {
                               })
                               .toList(growable: false),
                         ),
+                        const SizedBox(height: 12),
+                        _ResponsiveFilterRow(
+                          categoryValue: selectedCategory,
+                          tagValue: selectedTag,
+                          categories: categories,
+                          tags: tags,
+                          onCategoryChanged: (value) =>
+                              controller.updateCategoryFilter(value ?? ''),
+                          onTagChanged: (value) =>
+                              controller.updateTagFilter(value ?? ''),
+                        ),
+                        const SizedBox(height: 12),
+                        _SortRow(controller: controller),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: <Widget>[
+                            if (controller.savedFilters.isNotEmpty)
+                              ...controller.savedFilters.map(
+                                (filter) => InputChip(
+                                  label: Text(filter.name),
+                                  onPressed: () {
+                                    controller.applySavedFilter(filter);
+                                    _searchController.value = TextEditingValue(
+                                      text: controller.searchQuery,
+                                      selection: TextSelection.collapsed(
+                                        offset: controller.searchQuery.length,
+                                      ),
+                                    );
+                                  },
+                                  onDeleted: () {
+                                    controller.deleteSavedFilter(filter.id);
+                                  },
+                                ),
+                              ),
+                            if (controller.savedFilters.isEmpty)
+                              Text(
+                                'Nessun filtro salvato. Salva le combinazioni che usi più spesso.',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                          ],
+                        ),
+                        if (controller.searchQuery.isNotEmpty ||
+                            controller.statusFilter !=
+                                DestinationStatusFilter.all ||
+                            controller.categoryFilter.isNotEmpty ||
+                            controller.tagFilter.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: 12),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                _searchController.clear();
+                                controller.clearFilters();
+                              },
+                              icon: const Icon(Icons.filter_alt_off_outlined),
+                              label: const Text('Azzera filtri'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -126,15 +247,21 @@ class HomeScreen extends StatelessWidget {
                           destinations: destinations,
                           selectedDestinationId:
                               controller.selectedDestinationId,
+                          visibleColumnIds: controller.visibleColumnIds,
+                          currentSortField: controller.sortField,
+                          sortAscending: controller.sortAscending,
+                          columnLabelFor: controller.columnLabelFor,
+                          sortFieldForColumn: controller.sortFieldForColumn,
+                          onSortColumn: controller.sortByColumn,
                           onRowTap: (destination) async {
                             controller.selectDestination(destination.id);
-                            await onOpenDetail(destination.id);
+                            await widget.onOpenDetail(destination.id);
                           },
                           onEdit: (destination) async {
                             controller.selectDestination(destination.id);
-                            await onEditDestination(destination);
+                            await widget.onEditDestination(destination);
                           },
-                          onDelete: onDeleteDestination,
+                          onDelete: widget.onDeleteDestination,
                         ),
                 ),
               ],
@@ -179,7 +306,7 @@ class _SummaryCard extends StatelessWidget {
                 SizedBox(
                   width: tileWidth,
                   child: _MetricTile(
-                    label: 'Record',
+                    label: 'Record visibili',
                     value: '$visibleCount',
                     color: theme.colorScheme.primaryContainer,
                   ),
@@ -245,6 +372,123 @@ class _MetricTile extends StatelessWidget {
   }
 }
 
+class _ResponsiveFilterRow extends StatelessWidget {
+  const _ResponsiveFilterRow({
+    required this.categoryValue,
+    required this.tagValue,
+    required this.categories,
+    required this.tags,
+    required this.onCategoryChanged,
+    required this.onTagChanged,
+  });
+
+  final String categoryValue;
+  final String tagValue;
+  final List<String> categories;
+  final List<String> tags;
+  final ValueChanged<String?> onCategoryChanged;
+  final ValueChanged<String?> onTagChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final categoryField = DropdownButtonFormField<String>(
+      initialValue: categoryValue.isEmpty ? '' : categoryValue,
+      items: <DropdownMenuItem<String>>[
+        const DropdownMenuItem(value: '', child: Text('Tutte le categorie')),
+        ...categories.map(
+          (category) => DropdownMenuItem(value: category, child: Text(category)),
+        ),
+      ],
+      onChanged: onCategoryChanged,
+      decoration: const InputDecoration(labelText: 'Categoria'),
+    );
+
+    final tagField = DropdownButtonFormField<String>(
+      initialValue: tagValue.isEmpty ? '' : tagValue,
+      items: <DropdownMenuItem<String>>[
+        const DropdownMenuItem(value: '', child: Text('Tutti i tag')),
+        ...tags.map((tag) => DropdownMenuItem(value: tag, child: Text(tag))),
+      ],
+      onChanged: onTagChanged,
+      decoration: const InputDecoration(labelText: 'Tag'),
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 540) {
+          return Column(
+            children: <Widget>[
+              categoryField,
+              const SizedBox(height: 12),
+              tagField,
+            ],
+          );
+        }
+
+        return Row(
+          children: <Widget>[
+            Expanded(child: categoryField),
+            const SizedBox(width: 12),
+            Expanded(child: tagField),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _SortRow extends StatelessWidget {
+  const _SortRow({required this.controller});
+
+  final DestinationController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: DropdownButtonFormField<DestinationSortField>(
+            initialValue: controller.sortField,
+            items: DestinationSortField.values
+                .map(
+                  (field) => DropdownMenuItem<DestinationSortField>(
+                    value: field,
+                    child: Text(field.label),
+                  ),
+                )
+                .toList(growable: false),
+            onChanged: (value) {
+              if (value == null) {
+                return;
+              }
+              controller.updateSorting(
+                sortField: value,
+                sortAscending: controller.sortAscending,
+              );
+            },
+            decoration: const InputDecoration(labelText: 'Ordina per'),
+          ),
+        ),
+        const SizedBox(width: 12),
+        FilledButton.tonalIcon(
+          onPressed: () {
+            controller.updateSorting(
+              sortField: controller.sortField,
+              sortAscending: !controller.sortAscending,
+            );
+          },
+          icon: Icon(
+            controller.sortAscending
+                ? Icons.arrow_upward_outlined
+                : Icons.arrow_downward_outlined,
+          ),
+          label: Text(controller.sortAscending ? 'A-Z' : 'Z-A'),
+        ),
+      ],
+    );
+  }
+}
+
 class _DriveSyncCard extends StatelessWidget {
   const _DriveSyncCard({
     required this.isConfigured,
@@ -298,10 +542,7 @@ class _DriveSyncCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Text(
-              _buildDescription(),
-              style: theme.textTheme.bodyMedium,
-            ),
+            Text(_buildDescription(), style: theme.textTheme.bodyMedium),
             if (selectedFile != null) ...<Widget>[
               const SizedBox(height: 10),
               Text(
@@ -315,10 +556,7 @@ class _DriveSyncCard extends StatelessWidget {
               Widget
             >[
               const SizedBox(height: 4),
-              Text(
-                'Account: $accountEmail',
-                style: theme.textTheme.bodySmall,
-              ),
+              Text('Account: $accountEmail', style: theme.textTheme.bodySmall),
             ],
             if (lastSyncAt != null) ...<Widget>[
               const SizedBox(height: 4),

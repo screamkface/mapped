@@ -4,6 +4,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'controllers/destination_controller.dart';
 import 'screens/app_shell.dart';
+import 'services/app_preferences_service.dart';
+import 'services/data_exchange_service.dart';
 import 'services/destination_storage_service.dart';
 import 'services/destination_photo_service.dart';
 import 'services/drive_sync_service.dart';
@@ -19,6 +21,7 @@ Future<void> main() async {
   final preferences = await SharedPreferences.getInstance();
   final controller = DestinationController(
     storageService: DestinationStorageService(preferences),
+    preferencesService: AppPreferencesService(preferences),
     photoService: DestinationPhotoService(),
     driveSyncService: DriveSyncService(
       preferences,
@@ -27,6 +30,7 @@ Future<void> main() async {
     importService: ImportService(),
     navigationService: NavigationService(),
     geocodingService: GeocodingService(preferences),
+    dataExchangeService: DataExchangeService(),
   );
   await controller.initialize();
 
@@ -42,11 +46,15 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider<DestinationController>.value(
       value: controller,
-      child: MaterialApp(
-        title: 'Mapped',
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.light(),
-        home: const AppShell(),
+      child: Consumer<DestinationController>(
+        builder: (context, controller, _) {
+          return MaterialApp(
+            title: controller.projectName,
+            debugShowCheckedModeBanner: false,
+            theme: AppTheme.light(controller.projectColor),
+            home: const AppShell(),
+          );
+        },
       ),
     );
   }

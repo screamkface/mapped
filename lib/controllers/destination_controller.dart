@@ -1,24 +1,18 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
+import '../models/app_preferences.dart';
 import '../models/destination.dart';
-import '../services/destination_storage_service.dart';
+import '../services/app_preferences_service.dart';
+import '../services/data_exchange_service.dart';
 import '../services/destination_photo_service.dart';
+import '../services/destination_storage_service.dart';
 import '../services/drive_sync_service.dart';
 import '../services/geocoding_service.dart';
 import '../services/import_service.dart';
 import '../services/navigation_service.dart';
-
-enum DestinationStatusFilter { all, pending, completed }
-
-extension DestinationStatusFilterX on DestinationStatusFilter {
-  String get label => switch (this) {
-    DestinationStatusFilter.all => 'Tutti',
-    DestinationStatusFilter.pending => 'Da fare',
-    DestinationStatusFilter.completed => 'Completati',
-  };
-}
 
 class ImportSummary {
   const ImportSummary({
@@ -79,31 +73,50 @@ class DriveSyncSummary {
   final bool usedCachedFile;
 }
 
+class RestoreSummary {
+  const RestoreSummary({
+    required this.restoredDestinations,
+    required this.restoredProjectName,
+  });
+
+  final int restoredDestinations;
+  final String restoredProjectName;
+}
+
 class DestinationController extends ChangeNotifier {
   DestinationController({
     required DestinationStorageService storageService,
+    required AppPreferencesService preferencesService,
     required DestinationPhotoService photoService,
     required DriveSyncService driveSyncService,
     required ImportService importService,
     required NavigationService navigationService,
     required GeocodingService geocodingService,
+    required DataExchangeService dataExchangeService,
   }) : _storageService = storageService,
+       _preferencesService = preferencesService,
        _photoService = photoService,
        _driveSyncService = driveSyncService,
        _importService = importService,
        _navigationService = navigationService,
-       _geocodingService = geocodingService;
+       _geocodingService = geocodingService,
+       _dataExchangeService = dataExchangeService;
 
   final DestinationStorageService _storageService;
+  final AppPreferencesService _preferencesService;
   final DestinationPhotoService _photoService;
   final DriveSyncService _driveSyncService;
   final ImportService _importService;
   final NavigationService _navigationService;
   final GeocodingService _geocodingService;
+  final DataExchangeService _dataExchangeService;
 
   List<Destination> _destinations = <Destination>[];
+  AppPreferences _preferences = AppPreferences.defaults();
   String _searchQuery = '';
   DestinationStatusFilter _statusFilter = DestinationStatusFilter.all;
+  String _categoryFilter = '';
+  String _tagFilter = '';
   String? _selectedDestinationId;
   bool _isDriveBusy = false;
   DriveFileReference? _driveSelectedFile;
@@ -113,12 +126,26 @@ class DestinationController extends ChangeNotifier {
   List<Destination> get destinations => List.unmodifiable(_destinations);
   String get searchQuery => _searchQuery;
   DestinationStatusFilter get statusFilter => _statusFilter;
+  String get categoryFilter => _categoryFilter;
+  String get tagFilter => _tagFilter;
   String? get selectedDestinationId => _selectedDestinationId;
   bool get isDriveBusy => _isDriveBusy;
   bool get isDriveConfigured => _driveSyncService.isConfigured;
   DriveFileReference? get driveSelectedFile => _driveSelectedFile;
   String? get driveAccountEmail => _driveAccountEmail;
   DateTime? get driveLastSyncAt => _driveLastSyncAt;
+  String get projectName => _preferences.projectName;
+  Color get projectColor => Color(_preferences.projectColorValue);
+  int get projectColorValue => _preferences.projectColorValue;
+  DestinationSortField get sortField => _preferences.sortField;
+  bool get sortAscending => _preferences.sortAscending;
+  MarkerColorMode get markerColorMode => _preferences.markerColorMode;
+  List<String> get visibleColumnIds => List.unmodifiable(
+    _sanitizeVisibleColumns(_preferences.visibleColumns),
+  );
+  List<SavedFilterPreset> get savedFilters => List.unmodifiable(
+    _preferences.savedFilters,
+  );
 
   Destination? get selectedDestination {
     final id = _selectedDestinationId;
@@ -130,34 +157,52 @@ class DestinationController extends ChangeNotifier {
 
   List<Destination> get visibleDestinations {
     final query = _searchQuery.trim().toLowerCase();
-    final filtered = _destinations
-        .where((destination) {
-          final matchesCustomField = destination.customFields.entries.any(
-            (entry) =>
-                entry.key.toLowerCase().contains(query) ||
-                entry.value.toLowerCase().contains(query),
-          );
-          final matchesQuery =
-              query.isEmpty ||
-              destination.displayName.toLowerCase().contains(query) ||
-              destination.address.toLowerCase().contains(query) ||
-              destination.fullAddress.toLowerCase().contains(query) ||
-              destination.city.toLowerCase().contains(query) ||
-              matchesCustomField;
+    final filtered = _destinations.where((destination) {
+      final matchesCustomField = destination.customFields.entries.any(
+        (entry) =>
+            entry.key.toLowerCase().contains(query) ||
+            entry.value.toLowerCase().contains(query),
+      );
+      final matchesQuery =
+          query.isEmpty ||
+          destination.displayName.toLowerCase().contains(query) ||
+          destination.address.toLowerCase().contains(query) ||
+          destination.fullAddress.toLowerCase().contains(query) ||
+          destination.city.toLowerCase().contains(query) ||
+          destination.category.toLowerCase().contains(query) ||
+          destination.tags.any((tag) => tag.toLowerCase().contains(query)) ||
+          matchesCustomField;
 
-          if (!matchesQuery) {
-            return false;
-          }
+      if (!matchesQuery) {
+        return false;
+      }
 
-          return switch (_statusFilter) {
-            DestinationStatusFilter.all => true,
-            DestinationStatusFilter.pending =>
-              destination.status == DestinationStatus.pending,
-            DestinationStatusFilter.completed =>
-              destination.status == DestinationStatus.completed,
-          };
-        })
-        .toList(growable: false);
+      final matchesStatus = switch (_statusFilter) {
+        DestinationStatusFilter.all => true,
+        DestinationStatusFilter.pending =>
+          destination.status == DestinationStatus.pending,
+        DestinationStatusFilter.completed =>
+          destination.status == DestinationStatus.completed,
+      };
+
+      if (!matchesStatus) {
+        return false;
+      }
+
+      if (_categoryFilter.trim().isNotEmpty &&
+          destination.category.toLowerCase() != _categoryFilter.toLowerCase()) {
+        return false;
+      }
+
+      if (_tagFilter.trim().isNotEmpty &&
+          !destination.tags.any(
+            (tag) => tag.toLowerCase() == _tagFilter.toLowerCase(),
+          )) {
+        return false;
+      }
+
+      return true;
+    }).toList(growable: false);
 
     filtered.sort(_compareDestinations);
     return filtered;
@@ -171,8 +216,60 @@ class DestinationController extends ChangeNotifier {
       .where((destination) => !destination.hasCoordinates)
       .length;
 
+  List<String> get knownCategories {
+    final values = _destinations
+        .map((item) => item.category.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false)
+      ..sort((left, right) => left.toLowerCase().compareTo(right.toLowerCase()));
+    return values;
+  }
+
+  List<String> get knownTags {
+    final values = _destinations
+        .expand((item) => item.tags)
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false)
+      ..sort((left, right) => left.toLowerCase().compareTo(right.toLowerCase()));
+    return values;
+  }
+
+  List<String> get availableCustomFieldKeys {
+    final values = _destinations
+        .expand((item) => item.customFields.keys)
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false)
+      ..sort((left, right) => left.toLowerCase().compareTo(right.toLowerCase()));
+    return values;
+  }
+
+  List<String> get availableColumnIds {
+    return <String>[
+      'id',
+      'name',
+      'address',
+      'city',
+      'postalCode',
+      'phone',
+      'category',
+      'tags',
+      'status',
+      'dueDate',
+      'map',
+      'attachments',
+      'notes',
+      ...availableCustomFieldKeys.map((key) => 'custom:$key'),
+    ];
+  }
+
   Future<void> initialize() async {
     _destinations = await _storageService.loadDestinations();
+    _preferences = await _preferencesService.loadPreferences();
     _destinations.sort(_compareDestinations);
     await _driveSyncService.initialize();
     _refreshDriveState();
@@ -200,10 +297,10 @@ class DestinationController extends ChangeNotifier {
 
     _selectedDestinationId = resolvedDestination.id;
     _destinations.sort(_compareDestinations);
-    await _persist();
-    await _cleanupReplacedPhoto(
-      previousDestination?.photoPath,
-      resolvedDestination.photoPath,
+    await _persistDestinations();
+    await _cleanupRemovedAttachments(
+      previousDestination?.attachmentPaths ?? const <String>[],
+      resolvedDestination.attachmentPaths,
     );
 
     return SaveDestinationSummary(
@@ -220,8 +317,10 @@ class DestinationController extends ChangeNotifier {
     if (_selectedDestinationId == destinationId) {
       _selectedDestinationId = null;
     }
-    await _persist();
-    await _photoService.deletePhoto(existingDestination?.photoPath);
+    await _persistDestinations();
+    await _photoService.deletePhotos(
+      existingDestination?.attachmentPaths ?? const <String>[],
+    );
   }
 
   void updateSearchQuery(String value) {
@@ -234,6 +333,62 @@ class DestinationController extends ChangeNotifier {
       return;
     }
     _statusFilter = value;
+    notifyListeners();
+  }
+
+  void updateCategoryFilter(String value) {
+    _categoryFilter = value.trim();
+    notifyListeners();
+  }
+
+  void updateTagFilter(String value) {
+    _tagFilter = value.trim();
+    notifyListeners();
+  }
+
+  void clearFilters() {
+    _searchQuery = '';
+    _statusFilter = DestinationStatusFilter.all;
+    _categoryFilter = '';
+    _tagFilter = '';
+    notifyListeners();
+  }
+
+  Future<void> saveCurrentFilter(String name) async {
+    final trimmedName = name.trim();
+    if (trimmedName.isEmpty) {
+      return;
+    }
+
+    final updatedFilters = <SavedFilterPreset>[
+      ..._preferences.savedFilters,
+      SavedFilterPreset.create(
+        name: trimmedName,
+        searchQuery: _searchQuery,
+        statusFilter: _statusFilter,
+        category: _categoryFilter,
+        tag: _tagFilter,
+      ),
+    ];
+
+    _preferences = _preferences.copyWith(savedFilters: updatedFilters);
+    await _persistPreferences();
+  }
+
+  Future<void> deleteSavedFilter(String filterId) async {
+    _preferences = _preferences.copyWith(
+      savedFilters: _preferences.savedFilters
+          .where((item) => item.id != filterId)
+          .toList(growable: false),
+    );
+    await _persistPreferences();
+  }
+
+  void applySavedFilter(SavedFilterPreset preset) {
+    _searchQuery = preset.searchQuery;
+    _statusFilter = preset.statusFilter;
+    _categoryFilter = preset.category;
+    _tagFilter = preset.tag;
     notifyListeners();
   }
 
@@ -259,6 +414,27 @@ class DestinationController extends ChangeNotifier {
     if (result.cancelled) {
       return const ImportSummary.cancelled();
     }
+    return _applyImportResult(result);
+  }
+
+  Future<ImportDraft?> pickImportDraft() async {
+    final pickedFile = await _importService.pickImportFile();
+    if (pickedFile == null) {
+      return null;
+    }
+
+    return _importService.inspectBytes(
+      pickedFile.bytes,
+      extension: pickedFile.extension,
+      sourceName: pickedFile.sourceName,
+    );
+  }
+
+  Future<ImportSummary> importDraft(
+    ImportDraft draft,
+    ImportMappingConfig config,
+  ) async {
+    final result = _importService.parseDraft(draft, config);
     return _applyImportResult(result);
   }
 
@@ -295,6 +471,178 @@ class DestinationController extends ChangeNotifier {
     return _navigationService.openInGoogleMaps(destination);
   }
 
+  Future<List<GeocodingCandidate>> searchGeocodingCandidates(
+    String rawAddress,
+  ) {
+    return _geocodingService.searchCandidates(rawAddress);
+  }
+
+  Future<String?> exportCsv() {
+    return _dataExchangeService.exportCsv(_destinations);
+  }
+
+  Future<String?> exportXlsx() {
+    return _dataExchangeService.exportXlsx(_destinations);
+  }
+
+  Future<String?> exportBackup() {
+    return _dataExchangeService.exportBackup(
+      destinations: _destinations,
+      preferences: _preferences,
+    );
+  }
+
+  Future<RestoreSummary?> restoreFromBackup() async {
+    final backup = await _dataExchangeService.importBackup();
+    if (backup == null) {
+      return null;
+    }
+
+    final previousAttachments = _destinations
+        .expand((destination) => destination.attachmentPaths)
+        .toSet();
+    final nextAttachments = backup.destinations
+        .expand((destination) => destination.attachmentPaths)
+        .toSet();
+
+    _destinations = backup.destinations.toList(growable: false);
+    _preferences = backup.preferences;
+    _selectedDestinationId = _destinations.isEmpty ? null : _destinations.first.id;
+    await _persistAll();
+
+    final removedAttachments = previousAttachments
+        .where((path) => !nextAttachments.contains(path))
+        .toList(growable: false);
+    await _photoService.deletePhotos(removedAttachments);
+
+    return RestoreSummary(
+      restoredDestinations: _destinations.length,
+      restoredProjectName: _preferences.projectName,
+    );
+  }
+
+  Future<void> updateProjectSettings({
+    required String projectName,
+    required int projectColorValue,
+    required MarkerColorMode markerColorMode,
+  }) async {
+    _preferences = _preferences.copyWith(
+      projectName: projectName.trim().isEmpty ? 'Mapped' : projectName.trim(),
+      projectColorValue: projectColorValue,
+      markerColorMode: markerColorMode,
+    );
+    await _persistPreferences();
+  }
+
+  Future<void> updateSorting({
+    required DestinationSortField sortField,
+    required bool sortAscending,
+  }) async {
+    _preferences = _preferences.copyWith(
+      sortField: sortField,
+      sortAscending: sortAscending,
+    );
+    await _persistPreferences();
+  }
+
+  Future<void> sortByColumn(String columnId) async {
+    final targetField = sortFieldForColumn(columnId);
+    if (targetField == null) {
+      return;
+    }
+
+    final nextAscending = _preferences.sortField == targetField
+        ? !_preferences.sortAscending
+        : true;
+
+    await updateSorting(sortField: targetField, sortAscending: nextAscending);
+  }
+
+  Future<void> toggleVisibleColumn(String columnId) async {
+    final sanitizedColumns = _sanitizeVisibleColumns(_preferences.visibleColumns);
+    final updatedColumns = <String>[...sanitizedColumns];
+
+    if (updatedColumns.contains(columnId)) {
+      if (updatedColumns.length == 1) {
+        return;
+      }
+      updatedColumns.remove(columnId);
+    } else {
+      updatedColumns.add(columnId);
+    }
+
+    _preferences = _preferences.copyWith(visibleColumns: updatedColumns);
+    await _persistPreferences();
+  }
+
+  Future<void> setVisibleColumns(List<String> columnIds) async {
+    final sanitizedColumns = _sanitizeVisibleColumns(columnIds);
+    _preferences = _preferences.copyWith(visibleColumns: sanitizedColumns);
+    await _persistPreferences();
+  }
+
+  String columnLabelFor(String columnId) {
+    if (columnId.startsWith('custom:')) {
+      return columnId.substring('custom:'.length);
+    }
+
+    return switch (columnId) {
+      'id' => 'ID',
+      'name' => 'Nome',
+      'address' => 'Indirizzo',
+      'city' => 'Città',
+      'postalCode' => 'CAP',
+      'phone' => 'Telefono',
+      'category' => 'Categoria',
+      'tags' => 'Tag',
+      'status' => 'Stato',
+      'dueDate' => 'Scadenza',
+      'map' => 'Mappa',
+      'attachments' => 'Allegati',
+      'notes' => 'Note',
+      _ => columnId,
+    };
+  }
+
+  DestinationSortField? sortFieldForColumn(String columnId) {
+    return switch (columnId) {
+      'name' => DestinationSortField.name,
+      'address' => DestinationSortField.address,
+      'city' => DestinationSortField.city,
+      'postalCode' => DestinationSortField.postalCode,
+      'phone' => DestinationSortField.phone,
+      'status' => DestinationSortField.status,
+      'category' => DestinationSortField.category,
+      'dueDate' => DestinationSortField.dueDate,
+      _ => null,
+    };
+  }
+
+  double markerHueFor(Destination destination) {
+    if (_preferences.markerColorMode == MarkerColorMode.status ||
+        destination.category.trim().isEmpty) {
+      return destination.status == DestinationStatus.completed
+          ? BitmapDescriptor.hueGreen
+          : BitmapDescriptor.hueRed;
+    }
+
+    final hues = <double>[
+      BitmapDescriptor.hueAzure,
+      BitmapDescriptor.hueCyan,
+      BitmapDescriptor.hueGreen,
+      BitmapDescriptor.hueOrange,
+      BitmapDescriptor.hueRose,
+      BitmapDescriptor.hueViolet,
+      BitmapDescriptor.hueYellow,
+    ];
+
+    final hash = destination.category.toLowerCase().codeUnits.fold<int>(
+      0,
+      (total, item) => total + item,
+    );
+    return hues[hash % hues.length];
+  }
+
   Future<ImportSummary> _applyImportResult(ImportResult result) async {
     final byId = <String, Destination>{
       for (final destination in _destinations) destination.id: destination,
@@ -311,9 +659,10 @@ class DestinationController extends ChangeNotifier {
       );
       final existingDestination = byId[rawDestination.id];
       final destination = geocodingResult.destination.copyWith(
-        photoPath:
-            geocodingResult.destination.photoPath ??
-            existingDestination?.photoPath,
+        attachmentPaths:
+            geocodingResult.destination.attachmentPaths.isNotEmpty
+            ? geocodingResult.destination.attachmentPaths
+            : (existingDestination?.attachmentPaths ?? const <String>[]),
       );
 
       if (geocodingResult.wasGeocoded) {
@@ -335,7 +684,7 @@ class DestinationController extends ChangeNotifier {
     if (result.destinations.isNotEmpty) {
       _selectedDestinationId = result.destinations.first.id;
     }
-    await _persist();
+    await _persistDestinations();
 
     return ImportSummary(
       sourceName: result.sourceName,
@@ -347,8 +696,19 @@ class DestinationController extends ChangeNotifier {
     );
   }
 
-  Future<void> _persist() async {
+  Future<void> _persistAll() async {
     await _storageService.saveDestinations(_destinations);
+    await _preferencesService.savePreferences(_preferences);
+    notifyListeners();
+  }
+
+  Future<void> _persistDestinations() async {
+    await _storageService.saveDestinations(_destinations);
+    notifyListeners();
+  }
+
+  Future<void> _persistPreferences() async {
+    await _preferencesService.savePreferences(_preferences);
     notifyListeners();
   }
 
@@ -426,18 +786,42 @@ class DestinationController extends ChangeNotifier {
     }
   }
 
-  Future<void> _cleanupReplacedPhoto(
-    String? previousPhotoPath,
-    String? newPhotoPath,
+  Future<void> _cleanupRemovedAttachments(
+    List<String> previousAttachments,
+    List<String> nextAttachments,
   ) async {
-    if (previousPhotoPath == null || previousPhotoPath == newPhotoPath) {
-      return;
-    }
+    final removablePaths = previousAttachments
+        .where((path) => !nextAttachments.contains(path))
+        .toList(growable: false);
 
-    await _photoService.deletePhoto(previousPhotoPath);
+    await _photoService.deletePhotos(removablePaths);
   }
 
   int _compareDestinations(Destination left, Destination right) {
+    final rawComparison = switch (_preferences.sortField) {
+      DestinationSortField.name => left.displayName.toLowerCase().compareTo(
+        right.displayName.toLowerCase(),
+      ),
+      DestinationSortField.address =>
+        left.address.toLowerCase().compareTo(right.address.toLowerCase()),
+      DestinationSortField.city =>
+        left.city.toLowerCase().compareTo(right.city.toLowerCase()),
+      DestinationSortField.postalCode =>
+        left.postalCode.toLowerCase().compareTo(right.postalCode.toLowerCase()),
+      DestinationSortField.phone =>
+        left.phone.toLowerCase().compareTo(right.phone.toLowerCase()),
+      DestinationSortField.status =>
+        left.status.storageValue.compareTo(right.status.storageValue),
+      DestinationSortField.category =>
+        left.category.toLowerCase().compareTo(right.category.toLowerCase()),
+      DestinationSortField.dueDate => _compareDueDates(left.dueDate, right.dueDate),
+    };
+
+    final comparison = _preferences.sortAscending ? rawComparison : -rawComparison;
+    if (comparison != 0) {
+      return comparison;
+    }
+
     final nameComparison = left.displayName.toLowerCase().compareTo(
       right.displayName.toLowerCase(),
     );
@@ -445,5 +829,32 @@ class DestinationController extends ChangeNotifier {
       return nameComparison;
     }
     return left.id.compareTo(right.id);
+  }
+
+  int _compareDueDates(DateTime? left, DateTime? right) {
+    if (left == null && right == null) {
+      return 0;
+    }
+    if (left == null) {
+      return 1;
+    }
+    if (right == null) {
+      return -1;
+    }
+    return left.compareTo(right);
+  }
+
+  List<String> _sanitizeVisibleColumns(List<String> rawColumns) {
+    final allowedColumns = availableColumnIds.toSet();
+    final sanitized = rawColumns
+        .where((columnId) => allowedColumns.contains(columnId))
+        .toSet()
+        .toList(growable: false);
+
+    if (sanitized.isEmpty) {
+      return AppPreferences.defaults().visibleColumns;
+    }
+
+    return sanitized;
   }
 }

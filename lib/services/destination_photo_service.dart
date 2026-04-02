@@ -23,6 +23,33 @@ class DestinationPhotoService {
     return _persistImage(File(captured.path));
   }
 
+  Future<String?> pickPhotoFromGallery() async {
+    final selected = await _imagePicker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 88,
+      maxWidth: 1800,
+    );
+
+    if (selected == null) {
+      return null;
+    }
+
+    return _persistImage(File(selected.path));
+  }
+
+  Future<List<String>> pickMultiplePhotosFromGallery() async {
+    final selected = await _imagePicker.pickMultiImage(
+      imageQuality: 88,
+      maxWidth: 1800,
+    );
+
+    final paths = <String>[];
+    for (final image in selected) {
+      paths.add(await _persistImage(File(image.path)));
+    }
+    return paths;
+  }
+
   Future<void> deletePhoto(String? photoPath) async {
     if (photoPath == null || photoPath.trim().isEmpty) {
       return;
@@ -31,6 +58,12 @@ class DestinationPhotoService {
     final file = File(photoPath);
     if (await file.exists()) {
       await file.delete();
+    }
+  }
+
+  Future<void> deletePhotos(List<String> photoPaths) async {
+    for (final photoPath in photoPaths) {
+      await deletePhoto(photoPath);
     }
   }
 

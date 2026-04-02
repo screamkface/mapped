@@ -19,6 +19,18 @@ class GeocodingResult {
   bool get stillMissingCoordinates => !destination.hasCoordinates;
 }
 
+class GeocodingCandidate {
+  const GeocodingCandidate({
+    required this.label,
+    required this.latitude,
+    required this.longitude,
+  });
+
+  final String label;
+  final double latitude;
+  final double longitude;
+}
+
 class GeocodingService {
   GeocodingService(this._preferences)
     : _cache = _loadCache(_preferences.getString(_cacheStorageKey));
@@ -29,6 +41,50 @@ class GeocodingService {
 
   final SharedPreferences _preferences;
   final Map<String, _GeocodingCacheEntry> _cache;
+
+  Future<List<GeocodingCandidate>> searchCandidates(String rawAddress) async {
+    final address = rawAddress.trim();
+    if (address.isEmpty) {
+      return const <GeocodingCandidate>[];
+    }
+
+    final available = await isPresent();
+    if (!available) {
+      return const <GeocodingCandidate>[];
+    }
+
+    try {
+      final locations = await locationFromAddress(
+        address,
+      ).timeout(const Duration(seconds: 12));
+
+      final uniqueCandidates = <String, GeocodingCandidate>{};
+      for (final location in locations.take(5)) {
+        final latitude = location.latitude;
+        final longitude = location.longitude;
+        final key =
+            '${latitude.toStringAsFixed(6)},${longitude.toStringAsFixed(6)}';
+
+        final placemarks = await placemarkFromCoordinates(
+          latitude,
+          longitude,
+        ).timeout(const Duration(seconds: 8), onTimeout: () => <Placemark>[]);
+        final label = _buildPlacemarkLabel(placemarks);
+
+        uniqueCandidates[key] = GeocodingCandidate(
+          label: label.isEmpty
+              ? '${latitude.toStringAsFixed(5)}, ${longitude.toStringAsFixed(5)}'
+              : label,
+          latitude: latitude,
+          longitude: longitude,
+        );
+      }
+
+      return uniqueCandidates.values.toList(growable: false);
+    } catch (_) {
+      return const <GeocodingCandidate>[];
+    }
+  }
 
   Future<GeocodingResult> fillCoordinatesIfNeeded(
     Destination destination,
@@ -221,6 +277,20 @@ class GeocodingService {
         .toLowerCase()
         .replaceAll(RegExp(r'\s+'), ' ')
         .replaceAll(RegExp(r'[^\w\s]'), '');
+  }
+
+  String _buildPlacemarkLabel(List<Placemark> placemarks) {
+    if (placemarks.isEmpty) {
+      return '';
+    }
+
+    final placemark = placemarks.first;
+    return <String>[
+      placemark.street ?? '',
+      placemark.locality ?? '',
+      placemark.postalCode ?? '',
+      placemark.country ?? '',
+    ].where((value) => value.trim().isNotEmpty).join(', ');
   }
 }
 
