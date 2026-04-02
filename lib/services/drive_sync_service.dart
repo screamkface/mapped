@@ -21,6 +21,15 @@ const String _xlsxMimeType =
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const String _csvMimeType = 'text/csv';
 
+class DriveSyncException implements Exception {
+  const DriveSyncException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class DriveFileReference {
   const DriveFileReference({
     required this.id,
@@ -232,7 +241,7 @@ class DriveSyncService {
 
     final previousSelection = _selectedFile;
     if (previousSelection == null) {
-      throw StateError('Nessun file Drive selezionato.');
+      throw const DriveSyncException('Nessun file Drive selezionato.');
     }
 
     DriveFileReference currentFile;
@@ -420,7 +429,7 @@ class DriveSyncService {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError(_buildDriveHttpError(response));
+      throw DriveSyncException(_buildDriveHttpError(response));
     }
 
     return response;
@@ -438,7 +447,7 @@ class DriveSyncService {
     );
 
     if (headers == null) {
-      throw StateError(
+      throw DriveSyncException(
         allowUserPrompt
             ? 'Autorizzazione Google Drive non concessa.'
             : 'Autorizzazione Google Drive non disponibile in background.',
@@ -469,11 +478,11 @@ class DriveSyncService {
     }
 
     if (!allowUserPrompt) {
-      throw StateError('Account Google non collegato.');
+      throw const DriveSyncException('Account Google non collegato.');
     }
 
     if (_serverClientId.isEmpty) {
-      throw StateError(
+      throw const DriveSyncException(
         'Configura GOOGLE_DRIVE_SERVER_CLIENT_ID in android/gradle.properties prima di collegare Drive.',
       );
     }
@@ -484,7 +493,7 @@ class DriveSyncService {
       );
       return _currentUser!;
     } on GoogleSignInException catch (error) {
-      throw StateError(_describeGoogleSignInError(error));
+      throw DriveSyncException(_describeGoogleSignInError(error));
     }
   }
 
@@ -549,7 +558,8 @@ class DriveSyncService {
     return switch (error.code) {
       GoogleSignInExceptionCode.clientConfigurationError =>
         'Configurazione Google Sign-In non valida. Controlla package name, SHA-1 e GOOGLE_DRIVE_SERVER_CLIENT_ID.',
-      GoogleSignInExceptionCode.canceled => 'Accesso Google annullato.',
+      GoogleSignInExceptionCode.canceled =>
+        'Accesso Google annullato. Se il popup si chiude subito dopo aver scelto l’account, di solito è una configurazione OAuth errata: package name, SHA-1, client ID web o utente test.',
       GoogleSignInExceptionCode.interrupted =>
         'Accesso Google interrotto. Riprova.',
       _ => error.description?.trim().isNotEmpty == true
