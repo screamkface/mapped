@@ -1,0 +1,5 @@
+org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=4G -XX:ReservedCodeCacheSize=512m -XX:+HeapDumpOnOutOfMemoryError
+android.useAndroidX=true
+android.enableJetifier=true
+MAPS_API_KEY=INSERISCI_LA_TUA_CHIAVE_ANDROID
+GOOGLE_DRIVE_SERVER_CLIENT_ID=INSERISCI_IL_WEB_CLIENT_ID

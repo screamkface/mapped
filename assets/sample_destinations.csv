@@ -1,0 +1,6 @@
+id,nome,indirizzo,città,CAP,note,telefono,latitudine,longitudine,stato
+1,Sede Roma,"Via del Corso 1",Roma,00186,Priorità alta,+390612345678,41.902918,12.479459,da fare
+2,Cliente Milano,"Piazza del Duomo 12",Milano,20122,Confermare orario,+390212345678,45.464211,9.191383,completato
+3,Magazzino Firenze,"Via de' Tornabuoni 6",Firenze,50123,Scarico merci al retro,+390551234567,43.77094,11.25558,da fare
+4,Appuntamento Bologna,"Via Rizzoli 8",Bologna,40125,Coordinate mancanti: usare indirizzo,+390511234567,,,da fare
+5,Cliente Napoli,"Via Toledo 18",Napoli,80134,Chiamare 30 minuti prima,+390811234567,40.838239,14.248754,completato
