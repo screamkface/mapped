@@ -74,8 +74,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               target: _initialTarget(destinations),
               zoom: _initialZoom(destinations),
             ),
+            // Hybrid keeps city and street labels visible on satellite imagery.
+            mapType: MapType.hybrid,
             markers: destinations.map(_buildMarker).toSet(),
-            myLocationEnabled: _locationStatus == DeviceLocationStatus.available,
+            myLocationEnabled:
+                _locationStatus == DeviceLocationStatus.available,
             myLocationButtonEnabled:
                 _locationStatus == DeviceLocationStatus.available,
             mapToolbarEnabled: false,
@@ -138,10 +141,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         right: 16,
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: banners
-              .expand((banner) => <Widget>[banner, const SizedBox(height: 10)])
-              .toList(growable: true)
-            ..removeLast(),
+          children:
+              banners
+                  .expand(
+                    (banner) => <Widget>[banner, const SizedBox(height: 10)],
+                  )
+                  .toList(growable: true)
+                ..removeLast(),
         ),
       ),
     ];
@@ -201,8 +207,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Marker _buildMarker(Destination destination) {
     final controller = context.read<DestinationController>();
-    final isSelected =
-        destination.id == controller.selectedDestinationId;
+    final isSelected = destination.id == controller.selectedDestinationId;
 
     return Marker(
       markerId: MarkerId(destination.id),
@@ -332,7 +337,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (result.status == DeviceLocationStatus.available &&
         _currentLocation != null &&
         (recenterMap ||
-            context.read<DestinationController>().mappableDestinations.isEmpty)) {
+            context
+                .read<DestinationController>()
+                .mappableDestinations
+                .isEmpty)) {
       await _centerOnCurrentLocation();
     }
   }
@@ -418,10 +426,7 @@ class _StatusBanner extends StatelessWidget {
                 child: CircularProgressIndicator(strokeWidth: 2.2),
               )
             else if (actionLabel != null && onAction != null)
-              TextButton(
-                onPressed: onAction,
-                child: Text(actionLabel!),
-              ),
+              TextButton(onPressed: onAction, child: Text(actionLabel!)),
           ],
         ),
       ),
